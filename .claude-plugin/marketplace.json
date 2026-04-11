@@ -1,0 +1,22 @@
+{
+  "name": "brick-plugins",
+  "owner": {
+    "name": "Michael Rosenlund"
+  },
+  "metadata": {
+    "description": "Brick building ontology tools for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "brick-ontology-explorer",
+      "source": "./",
+      "description": "Explore, validate, query, and create Brick building ontology models. Provides tools for searching Brick classes, viewing class hierarchies, validating TTL files, running SPARQL queries, and generating building models.",
+      "version": "1.0.3",
+      "author": {
+        "name": "Michael Rosenlund"
+      },
+      "repository": "https://github.com/MichaelRosenlund/brick-explorer-plugin",
+      "keywords": ["brick", "ontology", "building", "hvac", "sparql", "ttl"]
+    }
+  ]
+}
