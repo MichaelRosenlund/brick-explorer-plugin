@@ -1,11 +1,19 @@
 {
   "name": "brick-ontology-explorer",
   "description": "Explore, validate, query, and create Brick building ontology models. Provides tools for searching Brick classes, viewing class hierarchies, validating TTL files, running SPARQL queries, and generating building models.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "mcpServers": {
     "brick-mcp": {
       "command": "uv",
-      "args": ["run", "python", "${CLAUDE_PLUGIN_ROOT}/servers/brick_mcp.py"]
+      "args": [
+        "run",
+        "--isolated",
+        "--with", "brickschema>=0.7.9",
+        "--with", "mcp",
+        "--with", "rdflib",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/servers/brick_mcp.py"
+      ]
     }
   },
   "skills": ["./skills"],
