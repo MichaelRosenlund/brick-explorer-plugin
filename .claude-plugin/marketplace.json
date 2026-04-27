@@ -10,8 +10,8 @@
     {
       "name": "brick-ontology-explorer",
       "source": "./",
-      "description": "Explore, validate, query, and create Brick building ontology models. Provides tools for searching Brick classes, viewing class hierarchies, validating TTL files, running SPARQL queries, and generating building models.",
-      "version": "1.0.3",
+      "description": "Explore, validate, query, create, and edit Brick building ontology models. Provides tools for searching Brick classes, viewing class hierarchies, validating TTL files, running SPARQL queries, generating building models, and adding/updating/deleting objects in existing models.",
+      "version": "1.1.0",
       "author": {
         "name": "Michael Rosenlund"
       },

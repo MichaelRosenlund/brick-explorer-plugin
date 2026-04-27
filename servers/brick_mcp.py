@@ -11,6 +11,7 @@ from typing import Optional
 import brickschema
 from mcp.server.fastmcp import FastMCP
 from rdflib import URIRef, Literal, Namespace
+from rdflib import Graph as RDFGraph
 from rdflib.namespace import RDF as _RDF, RDFS as _RDFS, OWL as _OWL, SKOS as _SKOS
 
 # ---------------------------------------------------------------------------
@@ -750,6 +751,314 @@ def brick_generate_model(
     ttl = "\n".join(lines)
     ttl += "\n# Tip: Brug brick_validate_ttl til at validere denne model."
     return ttl
+
+
+# ---------------------------------------------------------------------------
+# Tool Group 5: Modify Existing Models (Add / Update / Delete)
+# ---------------------------------------------------------------------------
+
+def _load_user_model(file_path: str) -> RDFGraph:
+    """Indlæs en bruger-TTL som plain rdflib.Graph (uden Brick-ontologien)."""
+    g = RDFGraph()
+    g.parse(file_path, format="turtle")
+    g.bind("brick", BRICK_NS, override=False)
+    g.bind("rec", REC_NS, override=False)
+    g.bind("rdfs", _RDFS, override=False)
+    g.bind("rdf", _RDF, override=False)
+    g.bind("owl", _OWL, override=False)
+    return g
+
+
+def _detect_bldg_namespace(g: RDFGraph) -> Optional[Namespace]:
+    for prefix, ns in g.namespaces():
+        if prefix == "bldg":
+            return Namespace(str(ns))
+    return None
+
+
+def _resolve_bldg_namespace(
+    g: RDFGraph, namespace: Optional[str]
+) -> tuple[Optional[Namespace], Optional[str]]:
+    if namespace:
+        return Namespace(namespace.rstrip("/").rstrip("#") + "#"), None
+    bldg = _detect_bldg_namespace(g)
+    if bldg is None:
+        return None, (
+            "Kunne ikke detektere bldg:-namespace i filen. "
+            "Angiv 'namespace' parameter eksplicit."
+        )
+    return bldg, None
+
+
+def _validate_entities(
+    entities: list, ontology: brickschema.Graph
+) -> list[str]:
+    errors = []
+    for ent in entities:
+        if not isinstance(ent, dict):
+            errors.append(f"Ugyldig entitet: {ent} (skal være en dict)")
+            continue
+        if "id" not in ent:
+            errors.append(f"Entitet mangler 'id': {ent}")
+            continue
+        if "type" not in ent:
+            errors.append(f"Entitet '{ent['id']}' mangler 'type'")
+            continue
+        if _resolve_class_name(ent["type"], ontology) is None:
+            errors.append(
+                f"Klassen '{ent['type']}' (entitet '{ent['id']}') findes ikke. "
+                f"Brug brick_search for at finde det korrekte navn."
+            )
+    return errors
+
+
+def _add_entity_triples(
+    g: RDFGraph,
+    bldg_ns: Namespace,
+    ent: dict,
+    ontology: brickschema.Graph,
+) -> None:
+    ent_uri = bldg_ns[ent["id"]]
+    cls_uri = _resolve_class_name(ent["type"], ontology)
+    g.add((ent_uri, _RDF.type, cls_uri))
+    if "label" in ent:
+        g.add((ent_uri, _RDFS.label, Literal(ent["label"])))
+    for pid in ent.get("hasPoint", []):
+        g.add((ent_uri, BRICK_NS.hasPoint, bldg_ns[pid]))
+    for fid in ent.get("feeds", []):
+        g.add((ent_uri, BRICK_NS.feeds, bldg_ns[fid]))
+    if "hasLocation" in ent:
+        g.add((ent_uri, BRICK_NS.hasLocation, bldg_ns[ent["hasLocation"]]))
+    for pid in ent.get("hasPart", []):
+        g.add((ent_uri, BRICK_NS.hasPart, bldg_ns[pid]))
+
+
+def _serialize_and_maybe_write(
+    g: RDFGraph, file_path: str, write: bool, summary: str
+) -> str:
+    ttl = g.serialize(format="turtle")
+    if write:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(ttl)
+        return (
+            f"✓ {summary}\n"
+            f"Filen er skrevet: {file_path}\n"
+            f"Husk at køre brick_validate_file for at verificere modellen."
+        )
+    return f"# DRY-RUN: {summary}\n# (write=False — filen er ikke ændret)\n\n{ttl}"
+
+
+@mcp.tool()
+def brick_add_objects(
+    file_path: str,
+    entities: list,
+    namespace: Optional[str] = None,
+    write: bool = True,
+) -> str:
+    """Tilføj nye entiteter til en eksisterende Brick TTL-model.
+
+    Validerer at filen findes, at alle Brick-klassenavne eksisterer, og at
+    ingen af de nye id'er kolliderer med eksisterende instanser. Brug
+    brick_update_objects til at ændre eksisterende objekter.
+
+    Args:
+        file_path: Sti til den eksisterende .ttl model-fil
+        entities: Liste af entitets-dicts (samme format som brick_generate_model):
+            - id (str, påkrævet): Unikt instans-navn
+            - type (str, påkrævet): Brick-klassenavn
+            - label (str, valgfrit)
+            - hasPoint, feeds, hasPart (list[str], valgfrit)
+            - hasLocation (str, valgfrit)
+        namespace: Bygnings-namespace URI. Hvis udeladt detekteres bldg:-prefixet
+                   automatisk fra filen.
+        write: Hvis True (default) skrives ændringerne tilbage til file_path.
+               Hvis False returneres den ændrede TTL som streng (dry-run).
+    """
+    if not os.path.exists(file_path):
+        return f"Fil ikke fundet: {file_path}"
+
+    ont = _get_ontology()
+    try:
+        g = _load_user_model(file_path)
+    except Exception as e:
+        return f"Fejl ved indlæsning af {file_path}: {e}"
+
+    bldg_ns, err = _resolve_bldg_namespace(g, namespace)
+    if err:
+        return err
+
+    errors = _validate_entities(entities, ont)
+    if errors:
+        return "Fejl - kan ikke tilføje:\n" + "\n".join(f"• {e}" for e in errors)
+
+    collisions = [
+        ent["id"]
+        for ent in entities
+        if (bldg_ns[ent["id"]], _RDF.type, None) in g
+    ]
+    if collisions:
+        return (
+            "Fejl - følgende id'er findes allerede i modellen: "
+            + ", ".join(collisions)
+            + ".\nBrug brick_update_objects til at ændre eksisterende objekter."
+        )
+
+    for ent in entities:
+        _add_entity_triples(g, bldg_ns, ent, ont)
+
+    return _serialize_and_maybe_write(
+        g, file_path, write,
+        summary=f"{len(entities)} entitet(er) tilføjet."
+    )
+
+
+@mcp.tool()
+def brick_update_objects(
+    file_path: str,
+    entities: list,
+    mode: str,
+    namespace: Optional[str] = None,
+    write: bool = True,
+) -> str:
+    """Opdatér eksisterende entiteter i en Brick TTL-model.
+
+    'mode' er PÅKRÆVET — vælg bevidst:
+    - "append":  Tilføjer nye triples til entiteten uden at fjerne eksisterende
+                 (f.eks. tilføj endnu en brick:hasPoint, eller en label).
+    - "replace": Sletter ALLE eksisterende triples med entiteten som subject
+                 og opretter den på ny ud fra de angivne felter. Bruges når
+                 entiteten skal rettes fundamentalt (f.eks. forkert type, eller
+                 et helt nyt sæt points).
+
+    Alle id'er skal allerede findes i modellen — brug brick_add_objects til nye.
+
+    Args:
+        file_path: Sti til den eksisterende .ttl model-fil
+        entities: Liste af entitets-dicts (samme format som brick_generate_model)
+        mode: "append" eller "replace" (påkrævet)
+        namespace: Bygnings-namespace URI (auto-detekteres hvis udeladt)
+        write: True = skriv tilbage til fil; False = dry-run (returnér TTL)
+    """
+    if mode not in ("append", "replace"):
+        return f"Ugyldig mode '{mode}'. Vælg 'append' eller 'replace'."
+    if not os.path.exists(file_path):
+        return f"Fil ikke fundet: {file_path}"
+
+    ont = _get_ontology()
+    try:
+        g = _load_user_model(file_path)
+    except Exception as e:
+        return f"Fejl ved indlæsning af {file_path}: {e}"
+
+    bldg_ns, err = _resolve_bldg_namespace(g, namespace)
+    if err:
+        return err
+
+    errors = _validate_entities(entities, ont)
+    if errors:
+        return "Fejl - kan ikke opdatere:\n" + "\n".join(f"• {e}" for e in errors)
+
+    not_found = [
+        ent["id"]
+        for ent in entities
+        if (bldg_ns[ent["id"]], _RDF.type, None) not in g
+    ]
+    if not_found:
+        return (
+            "Fejl - følgende id'er findes ikke i modellen: "
+            + ", ".join(not_found)
+            + ".\nBrug brick_add_objects til at oprette nye objekter."
+        )
+
+    if mode == "replace":
+        for ent in entities:
+            ent_uri = bldg_ns[ent["id"]]
+            for triple in list(g.triples((ent_uri, None, None))):
+                g.remove(triple)
+
+    for ent in entities:
+        _add_entity_triples(g, bldg_ns, ent, ont)
+
+    return _serialize_and_maybe_write(
+        g, file_path, write,
+        summary=f"{len(entities)} entitet(er) opdateret (mode={mode})."
+    )
+
+
+@mcp.tool()
+def brick_delete_objects(
+    file_path: str,
+    ids: list,
+    cleanup_references: bool = True,
+    namespace: Optional[str] = None,
+    write: bool = True,
+) -> str:
+    """Slet entiteter fra en Brick TTL-model.
+
+    Sletter alle triples med entiteten som subject. Hvis cleanup_references=True
+    (default) slettes også triples hvor entiteten optræder som object — dette
+    fjerner dangling references som ellers ville give valideringsfejl.
+
+    ADVARSEL: Sletning er IKKE kaskaderende på "tilhørende" entiteter — hvis du
+    sletter et udstyr og også vil slette dets points, skal du angive deres
+    id'er eksplicit i 'ids'. Brug evt. en SPARQL-query først for at finde dem.
+
+    Args:
+        file_path: Sti til den eksisterende .ttl model-fil
+        ids: Liste af entitets-id'er der skal slettes (uden bldg:-prefix)
+        cleanup_references: True (default) fjerner også triples der peger på de
+                            slettede entiteter. Sat til False kun ved bevidste
+                            mellemtrin (kan give valideringsfejl).
+        namespace: Bygnings-namespace URI (auto-detekteres hvis udeladt)
+        write: True = skriv tilbage til fil; False = dry-run (returnér TTL)
+    """
+    if not os.path.exists(file_path):
+        return f"Fil ikke fundet: {file_path}"
+
+    try:
+        g = _load_user_model(file_path)
+    except Exception as e:
+        return f"Fejl ved indlæsning af {file_path}: {e}"
+
+    bldg_ns, err = _resolve_bldg_namespace(g, namespace)
+    if err:
+        return err
+
+    not_found = []
+    deleted = 0
+    refs_removed = 0
+    for entity_id in ids:
+        ent_uri = bldg_ns[entity_id]
+        subject_triples = list(g.triples((ent_uri, None, None)))
+        if not subject_triples:
+            not_found.append(entity_id)
+            continue
+        for t in subject_triples:
+            g.remove(t)
+            deleted += 1
+        if cleanup_references:
+            for t in list(g.triples((None, None, ent_uri))):
+                g.remove(t)
+                refs_removed += 1
+
+    if deleted == 0:
+        return f"Fejl - ingen af de angivne id'er fandtes: {', '.join(not_found)}"
+
+    actually_deleted = len(ids) - len(not_found)
+    parts = [f"{deleted} triple(s) slettet for {actually_deleted} entitet(er)"]
+    if cleanup_references and refs_removed:
+        parts.append(f"{refs_removed} reference(r) ryddet op")
+    if not_found:
+        parts.append(f"{len(not_found)} id(er) fandtes ikke: {', '.join(not_found)}")
+    summary = ". ".join(parts) + "."
+
+    if not cleanup_references:
+        summary += (
+            " ADVARSEL: cleanup_references=False — der kan være dangling "
+            "references der vil give valideringsfejl."
+        )
+
+    return _serialize_and_maybe_write(g, file_path, write, summary=summary)
 
 
 # ---------------------------------------------------------------------------
